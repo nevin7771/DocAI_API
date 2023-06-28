@@ -7,17 +7,14 @@ from langchain.chains import ConversationalRetrievalChain,RetrievalQA,VectorDBQA
 from langchain.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain.text_splitter import CharacterTextSplitter,RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
+from langchain.memory import ConversationBufferMemory
 import os
-import pinecone
-import openai
 
 load_dotenv('.env')
 
 app = Flask(__name__)
 
 chat_history = []
-openai.api_key = os.getenv("OPENAI_API_KEY")
-openai.Engine.list()  # check we have authenticated
 
 @app.route('/upload', methods=['POST'])
 def upload_document():
@@ -71,29 +68,39 @@ def ask_question():
             return jsonify({"answer": answer})
         
     embeddings = OpenAIEmbeddings()
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     vectordb=Chroma(embedding_function=embeddings,persist_directory="./chroma_db")
     #docs = vectordb.similarity_search(question)
     retriever = vectordb.as_retriever(search_type="mmr")
 
 
     #llm = ChatOpenAI()
+    # Perform document retrieval based on the question
+    documents = vectordb.similarity_search(question)
 
-    #pdf_qa = ConversationalRetrievalChain.from_llm(
-    #    ChatOpenAI(temperature=0.7, model_name='gpt-3.5-turbo'),
-    #    retriever=vectordb.as_retriever(search_kwargs={'k': 6}),
-    #    return_source_documents=True,
-    #    verbose=False
-    #)
+    if not documents:
+        return jsonify({"answer": "I'm sorry, but there is no relevant information available for your question."})
 
-    qa = RetrievalQA.from_chain_type(
-        llm=OpenAI(),
-        chain_type="stuff",
-        retriever=retriever
+
+    pdf_qa = ConversationalRetrievalChain.from_llm(
+        OpenAI(),
+        retriever=vectordb.as_retriever(search_type="mmr"),
+        memory=memory
     )
+
+    #qa = RetrievalQA.from_chain_type(
+    #    llm=OpenAI(),
+    #    chain_type="stuff",
+    #    retriever=retriever
+    #)
     #qa = VectorDBQA.from_chain_type(llm=OpenAI(), chain_type="stuff", vectorstore=vectordb)
-    answer = qa.run(question)
+
+
+    answer = pdf_qa({"question": question})
+    #answer = pdf_qa.run(question)
     chat_history.append({"question": question, "answer": answer})
-    return jsonify({"answer": answer})
+    return jsonify({"answer": answer["answer"]})
+
 
 if __name__ == '__main__':
-    app.run(debug=True,port=5003)
+    app.run(debug=True,port=8000,host="0.0.0.0")
