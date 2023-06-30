@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify,render_template
+from flask_cors import CORS
 from dotenv import load_dotenv
 from langchain.llms import OpenAI
 from langchain.chat_models import ChatOpenAI
@@ -8,13 +9,18 @@ from langchain.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain.text_splitter import CharacterTextSplitter,RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.memory import ConversationBufferMemory
+import tempfile
 import os
 
 load_dotenv('.env')
 
 app = Flask(__name__)
-
+CORS(app)
 chat_history = []
+
+@app.route('/')
+def index():
+    return render_template('index.html')
 
 @app.route('/upload', methods=['POST'])
 def upload_document():
@@ -22,19 +28,14 @@ def upload_document():
     if file and file.filename.endswith('.pdf'):
         documents = []
 
-        for file in os.listdir("docs"):
-            if file.endswith(".pdf"):
-                pdf_path = "./docs/" + file
-                loader = PyPDFLoader(pdf_path)
-                documents.extend(loader.load())
-            elif file.endswith('.docx') or file.endswith('.doc'):
-                doc_path = "./docs/" + file
-                loader = Docx2txtLoader(doc_path)
-                documents.extend(loader.load())
-            elif file.endswith('.txt'):
-                text_path = "./docs/" + file
-                loader = TextLoader(text_path)
-                documents.extend(loader.load())
+        with tempfile.NamedTemporaryFile(suffix='.pdf') as temp_file:
+            file.save(temp_file.name)
+
+            # Load and process the PDF file
+            pdf_path = temp_file.name
+            loader = PyPDFLoader(pdf_path)
+            documents.extend(loader.load())
+
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         documents = text_splitter.split_documents(documents)
@@ -55,7 +56,7 @@ def upload_document():
 def ask_question():
     data = request.get_json()
     question = data.get('question')
-
+    
     if not question:
         return jsonify({"message": "Question is required."}), 400
 
@@ -65,42 +66,48 @@ def ask_question():
     for entry in chat_history:
         if entry["question"] == question:
             answer = entry["answer"]
-            return jsonify({"answer": answer})
+            return jsonify({"answer": answer['result']})
         
     embeddings = OpenAIEmbeddings()
     memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
     vectordb=Chroma(embedding_function=embeddings,persist_directory="./chroma_db")
     #docs = vectordb.similarity_search(question)
-    retriever = vectordb.as_retriever(search_type="mmr")
+    retriever = vectordb.as_retriever(search_type="similarity",search_kwargs={"k": 1})
+    
+    
+    docs = vectordb.similarity_search(question)
+    #chain = load_qa_with_sources_chain(llm=OpenAI(), chain_type="stuff")
+
+    #chain({"input_documents": docs, "question": question}, return_only_outputs=True)
 
 
-    #llm = ChatOpenAI()
-    # Perform document retrieval based on the question
-    documents = vectordb.similarity_search(question)
-
-    if not documents:
+    if not docs:
         return jsonify({"answer": "I'm sorry, but there is no relevant information available for your question."})
 
 
-    pdf_qa = ConversationalRetrievalChain.from_llm(
-        OpenAI(),
-        retriever=vectordb.as_retriever(search_type="mmr"),
-        memory=memory
-    )
-
-    #qa = RetrievalQA.from_chain_type(
-    #    llm=OpenAI(),
-    #    chain_type="stuff",
-    #    retriever=retriever
+    #pdf_qa = ConversationalRetrievalChain.from_llm(
+    #    OpenAI(),
+    #    retriever=retriever,
+    #    memory=memory,
+    #    chain_type="stuff"
     #)
+
+    qa = RetrievalQA.from_chain_type(
+        llm=OpenAI(),
+        chain_type="stuff",
+        retriever=retriever
+    )
     #qa = VectorDBQA.from_chain_type(llm=OpenAI(), chain_type="stuff", vectorstore=vectordb)
 
 
-    answer = pdf_qa({"question": question})
-    #answer = pdf_qa.run(question)
+    answer = qa({"query": question})
+    
+    if answer['result'].startswith(" I don't know"):
+        answer['result'] = "I'm sorry, there is no relevant information available for your question."
+    
     chat_history.append({"question": question, "answer": answer})
-    return jsonify({"answer": answer["answer"]})
-
+    return jsonify({"answer": answer['result']})
 
 if __name__ == '__main__':
     app.run(debug=True,port=8000,host="0.0.0.0")
+
